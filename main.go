@@ -26,6 +26,7 @@ const usage = `pathed - edit the persistent PATH
   pathed add <dir> [-m] [--front]
   pathed rm <dir|N> [-m]   N is the number shown by 'pathed list'
   pathed clean [-m]        drop duplicates and folders that do not exist
+  pathed --version         print the version
 
 -m works on the Machine PATH, which needs admin: 'gsudo pathed ...'.
 Every write first saves the old value to %LOCALAPPDATA%\pathed\.`
@@ -175,6 +176,9 @@ func run(args []string) error {
 			front = true
 		case "-h", "--help", "help":
 			fmt.Println(usage)
+			return nil
+		case "-v", "--version":
+			fmt.Println("pathed", versionString())
 			return nil
 		default:
 			rest = append(rest, a)
