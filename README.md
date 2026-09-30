@@ -3,6 +3,10 @@
 View and edit the persistent Windows `PATH`, User and Machine, from a TUI or the command
 line.
 
+Windows only: there the `PATH` is a setting the system keeps (in the registry). On Linux and
+macOS it is put together at login by shell startup files (`~/.profile`, `~/.zshrc`,
+`/etc/paths.d`, ...), so the place to change it is those files.
+
 It writes the registry directly, so `REG_EXPAND_SZ` values and their `%VARS%` stay intact
 (.NET's `SetEnvironmentVariable` rewrites them as `REG_SZ`). Every write first saves the old
 value to `%LOCALAPPDATA%\pathed\`, and running programs are told the environment changed,
