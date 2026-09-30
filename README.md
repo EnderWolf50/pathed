@@ -58,13 +58,22 @@ pathed changes the saved `PATH`; the shell it runs in keeps its own copy. To upd
 too, wrap it, e.g. in PowerShell:
 
 ```powershell
+# The saved PATH, Machine then User, one folder per item.
+function Get-SavedPath {
+  'Machine', 'User' |
+    ForEach-Object { [Environment]::GetEnvironmentVariable('Path', $_) -split ';' } |
+    Where-Object { $_ }
+}
+
 function pathed {
-  $saved = { ('Machine', 'User' | ForEach-Object { [Environment]::GetEnvironmentVariable('Path', $_) }) -join ';' -split ';' | Where-Object { $_ } }
-  $before = & $saved
+  $before = Get-SavedPath
   pathed.exe @args
-  $after = & $saved
-  $session = @($env:PATH -split ';' | Where-Object { $_ -and ($_ -in $after -or $_ -notin $before) })
-  $env:PATH = ($session + @($after | Where-Object { $_ -notin $before -and $_ -notin $session })) -join ';'
+  $after = Get-SavedPath
+
+  $removed = @($before | Where-Object { $_ -notin $after })
+  $added = @($after | Where-Object { $_ -notin $before })
+  $kept = @($env:PATH -split ';' | Where-Object { $_ -and $_ -notin $removed })
+  $env:PATH = ($kept + @($added | Where-Object { $_ -notin $kept })) -join ';'
 }
 ```
 
