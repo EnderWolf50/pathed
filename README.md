@@ -29,6 +29,7 @@ pathed list [-m]         numbered entries; missing folders and duplicates are ma
 pathed add <dir> [-m] [--front]
 pathed rm <dir|N> [-m]   N is the number shown by 'pathed list'
 pathed clean [-m]        drop duplicates and folders that do not exist
+pathed init pwsh         print a PowerShell wrapper that also updates the current shell
 ```
 
 `-m` works on the Machine `PATH`. Writing it needs admin: unless pathed already runs
@@ -55,27 +56,15 @@ added entries show green, edited ones amber, removed ones red and struck through
 Settings (theme colors, sidebar width) live in `~/.config/pathed/config.toml`, or the file
 named by `$PATHED_CONFIG`; `pathed --default-config` prints a commented starting point.
 
-pathed changes the saved `PATH`; the shell it runs in keeps its own copy. To update that
-too, wrap it, e.g. in PowerShell:
+pathed changes the saved `PATH`, but the shell it runs in keeps its own copy, which a program
+the shell starts cannot change. `pathed init pwsh` prints a PowerShell function named
+`pathed` that runs `pathed.exe` and then applies the change to the shell as well: entries
+that were added go to the end of `$env:PATH`, removed ones are dropped, and entries only this
+session has (from mise, a venv, ...) stay. To load it in every shell, add this to your
+`$PROFILE`:
 
 ```powershell
-# The saved PATH, Machine then User, one folder per item.
-function Get-SavedPath {
-  'Machine', 'User' |
-    ForEach-Object { [Environment]::GetEnvironmentVariable('Path', $_) -split ';' } |
-    Where-Object { $_ }
-}
-
-function pathed {
-  $before = Get-SavedPath
-  pathed.exe @args
-  $after = Get-SavedPath
-
-  $removed = @($before | Where-Object { $_ -notin $after })
-  $added = @($after | Where-Object { $_ -notin $before })
-  $kept = @($env:PATH -split ';' | Where-Object { $_ -and $_ -notin $removed })
-  $env:PATH = ($kept + @($added | Where-Object { $_ -notin $kept })) -join ';'
-}
+pathed.exe init pwsh | Out-String | Invoke-Expression
 ```
 
 ## License
