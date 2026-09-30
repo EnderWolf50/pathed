@@ -9,8 +9,13 @@ macOS it is put together at login by shell startup files (`~/.profile`, `~/.zshr
 
 It writes the registry directly, so `REG_EXPAND_SZ` values and their `%VARS%` stay intact
 (.NET's `SetEnvironmentVariable` rewrites them as `REG_SZ`). Every write first saves the old
-value to `%LOCALAPPDATA%\pathed\`, and running programs are told the environment changed,
-so new windows see it without signing out.
+value to `%LOCALAPPDATA%\enved\` (older versions used `%LOCALAPPDATA%\pathed\`), refuses to
+overwrite a PATH something else changed since pathed read it, and tells running programs the
+environment changed, so new windows see it without signing out.
+
+pathed is the PATH-only sibling of [enved](https://github.com/EnderWolf50/enved), which edits
+every environment variable and opens `Path` (and other lists) in this same editor. The
+registry, UAC and screen code live in enved's packages; pathed is a thin program over them.
 
 ## Install
 
