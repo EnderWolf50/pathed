@@ -2,237 +2,513 @@ package main
 
 import (
 	"fmt"
-	"path/filepath"
+	"os/exec"
+	"slices"
 	"strings"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/table"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
+
+// store is where the PATHs live: the registry, or a fake in tests.
+type store struct {
+	read     func(scope) (pathValue, error)
+	write    func(s scope, old, new pathValue) error
+	canWrite func(scope) bool
+	exists   func(string) bool
+}
+
+var registryStore = store{read: read, write: write, canWrite: canWrite, exists: exists}
+
+// entry is one PATH entry and how it changed since the last save.
+type entry struct {
+	value   string // what will be saved
+	orig    string // what was saved; "" for an entry added since
+	removed bool   // marked to go, still shown until the save
+}
+
+func (e *entry) added() bool  { return e.orig == "" }
+func (e *entry) edited() bool { return e.orig != "" && e.value != e.orig }
+
+// tab is one PATH, User or Machine.
+type tab struct {
+	scope    scope
+	saved    pathValue
+	entries  []*entry
+	err      error // it could not be read
+	readOnly bool  // it cannot be written without admin
+}
+
+func (t *tab) load(st store) {
+	t.saved, t.err = st.read(t.scope)
+	t.readOnly = !st.canWrite(t.scope)
+	t.entries = nil
+	for _, v := range t.saved.entries {
+		t.entries = append(t.entries, &entry{value: v, orig: v})
+	}
+}
+
+// result is the PATH as saving would write it.
+func (t *tab) result() []string {
+	var out []string
+	for _, e := range t.entries {
+		if !e.removed {
+			out = append(out, e.value)
+		}
+	}
+	return out
+}
+
+func (t *tab) dirty() bool { return !slices.Equal(t.result(), t.saved.entries) }
+
+// reordered says whether the entries kept from the last save are in another order.
+func (t *tab) reordered() bool {
+	var kept []string
+	for _, e := range t.entries {
+		if !e.added() && !e.removed {
+			kept = append(kept, e.orig)
+		}
+	}
+	var was []string
+	for _, v := range t.saved.entries {
+		if slices.Contains(kept, v) {
+			was = append(was, v)
+		}
+	}
+	return !slices.Equal(kept, was)
+}
+
+// health is what is wrong with each entry: its folder is missing, or it repeats an earlier
+// entry (dupOf is that entry's position, from 1). Removed entries are left out of both.
+func (t *tab) health(exists func(string) bool) (missing []bool, dupOf []int) {
+	missing, dupOf = make([]bool, len(t.entries)), make([]int, len(t.entries))
+	first := map[string]int{}
+	for i, e := range t.entries {
+		if e.removed {
+			continue
+		}
+		missing[i] = !exists(e.value)
+		k := pathKey(e.value)
+		if j, seen := first[k]; seen {
+			dupOf[i] = j + 1
+		} else {
+			first[k] = i
+		}
+	}
+	return missing, dupOf
+}
 
 var (
-	styleTab     = lipgloss.NewStyle().Padding(0, 1)
-	styleTabOn   = styleTab.Reverse(true).Bold(true)
-	styleCursor  = lipgloss.NewStyle().Reverse(true)
-	styleMissing = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff8080"))
-	styleDup     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffc799"))
-	styleHelp    = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b8b8b"))
+	keyUp     = key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up"))
+	keyDown   = key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down"))
+	keyMoveUp = key.NewBinding(key.WithKeys("K", "shift+up"), key.WithHelp("K/J", "move"))
+	keyMoveDn = key.NewBinding(key.WithKeys("J", "shift+down"))
+	keyAdd    = key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add"))
+	keyEdit   = key.NewBinding(key.WithKeys("enter", "e"), key.WithHelp("enter/e", "edit"))
+	keyRemove = key.NewBinding(key.WithKeys("d", "x", "delete"), key.WithHelp("d", "remove"))
+	keyClean  = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clean"))
+	keyUndo   = key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo all"))
+	keyOpen   = key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open folder"))
+	keyFilter = key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter"))
+	keyReload = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reload"))
+	keySave   = key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "save"))
+	keyBack   = key.NewBinding(key.WithKeys("left", "h", "esc", "q"), key.WithHelp("←/h/esc/q", "back"))
 )
 
-type tab struct {
-	saved, cur pathValue
-	err        error
-}
-
-func (t tab) dirty() bool {
-	return strings.Join(t.saved.entries, ";") != strings.Join(t.cur.entries, ";")
-}
-
 type model struct {
-	tabs        []tab
-	on, cursor  int
-	top, height int
-	input       textinput.Model
-	editing     int // -1 when not editing; len(entries) means adding
-	msg         string
-	confirmQuit bool
+	st     store
+	tabs   []*tab
+	on     int   // the sidebar's selection
+	inList bool  // focus: the table (true) or the sidebar
+	shown  []int // positions in the tab's entries that the table shows, narrowed by the filter
+	table  table.Model
+	filter textinput.Model
+	help   help.Model
+	w, h   int    // terminal size
+	status string // a one-off note next to the heading, cleared by the next key
+
+	// At most one of these is open over or instead of the list.
+	input       *inputBox // adding or editing an entry
+	confirmQuit bool      // unsaved changes: quit anyway?
+	reviewing   bool      // the changes, before saving them
+	outcome     []string  // what the save did, shown on the review screen afterwards
 }
 
-func newModel() model {
-	m := model{editing: -1, height: 20, input: textinput.New()}
+func newModel(st store) model {
+	m := model{st: st, filter: textinput.New(), help: help.New()}
 	for _, s := range scopes {
-		v, err := read(s)
-		m.tabs = append(m.tabs, tab{saved: v, cur: pathValue{append([]string(nil), v.entries...), v.typ}, err: err})
+		t := &tab{scope: s}
+		t.load(st)
+		m.tabs = append(m.tabs, t)
 	}
+	m.filter.Prompt = "/ "
+	m.filter.Placeholder = "filter the entries"
+
+	km := table.DefaultKeyMap() // moving; everything else is ours
+	km.PageUp = key.NewBinding(key.WithKeys("pgup"))
+	km.PageDown = key.NewBinding(key.WithKeys("pgdown"))
+	km.HalfPageUp = key.NewBinding(key.WithKeys("ctrl+u"))
+	km.HalfPageDown = key.NewBinding(key.WithKeys("ctrl+d"))
+	styles := table.DefaultStyles()
+	styles.Header = styles.Header.Padding(0).Foreground(colorDim).BorderForeground(colorFaint)
+	styles.Cell = lipgloss.NewStyle()     // redraw pads and paints every cell itself
+	styles.Selected = lipgloss.NewStyle() // the cursor row is painted by redraw too
+	m.table = table.New(table.WithColumns(columns(80)), table.WithKeyMap(km), table.WithStyles(styles), table.WithFocused(true))
+	m.refresh()
 	return m
 }
 
 func (m model) Init() tea.Cmd { return nil }
 
-func (m model) entries() []string { return m.tabs[m.on].cur.entries }
+func (m model) tab() *tab { return m.tabs[m.on] }
 
-func (m *model) setEntries(e []string) { m.tabs[m.on].cur.entries = e }
+func sideWidth() int { return cfg.SidebarWidth }
+
+// Lines of the right panel around the table: heading and filter above; a blank, the
+// divider, two detail lines and the help below.
+const tableChrome = 7
+
+// columns fits the table to the panel: the path takes what the others leave. The widths
+// include a cell of padding on each side, which redraw paints itself so a row's background
+// runs unbroken.
+func columns(width int) []table.Column {
+	cols := []table.Column{{Title: "", Width: 2}, {Title: "#", Width: 3}, {Title: "PATH"}, {Title: "STATUS", Width: 12}}
+	used := 0
+	for _, c := range cols {
+		used += c.Width + 2
+	}
+	cols[2].Width = max(width-used, 10)
+	for i := range cols {
+		cols[i].Width += 2
+		cols[i].Title = " " + cols[i].Title
+	}
+	return cols
+}
+
+// refresh recomputes which entries the table shows.
+func (m *model) refresh() {
+	query := strings.ToLower(m.filter.Value())
+	m.shown = nil
+	for i, e := range m.tab().entries {
+		if strings.Contains(strings.ToLower(e.value), query) {
+			m.shown = append(m.shown, i)
+		}
+	}
+	m.redraw()
+}
+
+// redraw turns the shown entries into table cells; it runs after every change or cursor
+// move, because the cursor mark, the status and the row colors live in the cells.
+func (m *model) redraw() {
+	t := m.tab()
+	missing, dupOf := t.health(m.st.exists)
+	cursor := min(m.table.Cursor(), max(len(m.shown)-1, 0))
+	cols := m.table.Columns()
+	cells := make([]table.Row, len(m.shown))
+	for row, i := range m.shown {
+		e := t.entries[i]
+		onCursor := row == cursor && m.inList
+		// A background only holds up to the next reset, so every piece of the row is painted
+		// with it: each colored run and each cell's padding.
+		var bg lipgloss.Style
+		sign := " "
+		switch {
+		case e.removed:
+			bg, sign = bg.Background(pick(onCursor, bgRemovedCursor, bgRemoved)), "-"
+		case e.added():
+			bg, sign = bg.Background(pick(onCursor, bgAddedCursor, bgAdded)), "+"
+		case e.edited():
+			bg, sign = bg.Background(pick(onCursor, bgEditedCursor, bgEdited)), "~"
+		case onCursor:
+			bg = bg.Background(bgCursor)
+		}
+		paint := func(s lipgloss.Style, text string) string {
+			if c := bg.GetBackground(); c != nil {
+				s = s.Background(c)
+			}
+			return s.Render(text)
+		}
+		plain := lipgloss.NewStyle()
+
+		mark := paint(plain, " ")
+		if onCursor {
+			mark = paint(styleAccent, "›")
+		}
+		path, state := paint(plain, e.value), paint(styleOK, "ok")
+		switch {
+		case e.removed:
+			path, state = paint(styleDim.Strikethrough(true), e.value), paint(styleErr, "removed")
+		case dupOf[i] > 0:
+			state = paint(styleWarn, fmt.Sprintf("same as #%d", dupOf[i]))
+		case missing[i]:
+			state = paint(styleErr, "missing")
+		}
+		cellsOf := table.Row{mark + paint(styleAccent, sign), paint(styleDim, fmt.Sprint(i+1)), path, state}
+		for c := range cellsOf {
+			w := cols[c].Width
+			cellsOf[c] = bg.Width(w).Padding(0, 1).Render(ansi.Truncate(cellsOf[c], max(w-2, 0), paint(plain, "…")))
+		}
+		cells[row] = cellsOf
+	}
+	m.table.SetRows(cells)
+	m.table.SetCursor(cursor)
+}
+
+func pick[T any](cond bool, a, b T) T {
+	if cond {
+		return a
+	}
+	return b
+}
+
+// current is the entry under the cursor and its position in the tab.
+func (m model) current() (*entry, int, bool) {
+	c := m.table.Cursor()
+	if c < 0 || c >= len(m.shown) {
+		return nil, -1, false
+	}
+	i := m.shown[c]
+	return m.tab().entries[i], i, true
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.height = max(msg.Height-7, 3)
+		m.w, m.h = msg.Width, msg.Height
+		frameW, frameH := stylePanel.GetFrameSize()
+		width := m.w - sideWidth() - frameW
+		m.table.SetColumns(columns(width))
+		m.table.SetWidth(width)
+		m.table.SetHeight(m.h - frameH - tableChrome)
+		m.filter.SetWidth(width - 2)
+		m.help.SetWidth(width)
+		m.redraw()
 	case tea.KeyPressMsg:
-		if m.editing >= 0 {
-			m, cmd = m.updateInput(msg)
-		} else {
-			m, cmd = m.updateList(msg)
-		}
-	}
-	// Scroll so the cursor stays inside the visible window.
-	m.top = min(m.top, m.cursor)
-	if m.cursor >= m.top+m.height {
-		m.top = m.cursor - m.height + 1
-	}
-	return m, cmd
-}
-
-func (m model) updateInput(msg tea.KeyPressMsg) (model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.editing = -1
-		return m, nil
-	case "enter":
-		v := strings.TrimSpace(m.input.Value())
-		e := append([]string(nil), m.entries()...)
-		if v != "" && !strings.Contains(v, "%") {
-			if abs, err := filepath.Abs(v); err == nil {
-				v = abs
-			}
+		m.status = ""
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
 		}
 		switch {
-		case v == "":
-		case m.editing == len(e):
-			e = append(e[:m.cursor+min(1, len(e))], append([]string{v}, e[m.cursor+min(1, len(e)):]...)...)
-			m.cursor = min(m.cursor+1, len(e)-1)
+		case m.confirmQuit:
+			return m.updateQuit(msg)
+		case m.input != nil:
+			return m.updateInput(msg)
+		case m.reviewing:
+			return m.updateReview(msg)
+		case m.filter.Focused():
+			return m.updateFilter(msg)
+		case m.inList:
+			return m.updateList(msg)
 		default:
-			e[m.editing] = v
+			return m.updateSide(msg)
 		}
-		m.setEntries(e)
-		m.editing = -1
-		return m, nil
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	if m.input != nil {
+		m.input.field, cmd = m.input.field.Update(msg) // the cursor blink
+	} else {
+		m.filter, cmd = m.filter.Update(msg)
+	}
 	return m, cmd
 }
 
-func (m model) updateList(msg tea.KeyPressMsg) (model, tea.Cmd) {
-	k := msg.String()
-	if k != "q" && k != "esc" && k != "ctrl+c" {
-		m.confirmQuit = false
-	}
-	m.msg = ""
-	e := m.entries()
-	switch k {
-	case "q", "esc", "ctrl+c":
-		if k != "ctrl+c" && !m.confirmQuit && (m.tabs[0].dirty() || m.tabs[1].dirty()) {
+func (m model) anyDirty() bool {
+	return slices.ContainsFunc(m.tabs, func(t *tab) bool { return t.dirty() })
+}
+
+// The sidebar picks a PATH; enter hands the keys to its table.
+func (m model) updateSide(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		if m.anyDirty() {
 			m.confirmQuit = true
-			m.msg = "unsaved changes: s saves, q again discards them"
 			return m, nil
 		}
 		return m, tea.Quit
-	case "tab", "left", "right", "h", "l":
-		m.on, m.cursor, m.top = 1-m.on, 0, 0
-	case "up", "k":
-		m.cursor = max(m.cursor-1, 0)
-	case "down", "j":
-		m.cursor = min(m.cursor+1, max(len(e)-1, 0))
-	case "home", "g":
-		m.cursor = 0
-	case "end", "G":
-		m.cursor = max(len(e)-1, 0)
-	case "shift+up", "K":
-		if m.cursor > 0 {
-			e = append([]string(nil), e...)
-			e[m.cursor-1], e[m.cursor] = e[m.cursor], e[m.cursor-1]
-			m.setEntries(e)
-			m.cursor--
-		}
-	case "shift+down", "J":
-		if m.cursor < len(e)-1 {
-			e = append([]string(nil), e...)
-			e[m.cursor+1], e[m.cursor] = e[m.cursor], e[m.cursor+1]
-			m.setEntries(e)
-			m.cursor++
-		}
-	case "d", "x", "delete":
-		if len(e) > 0 {
-			m.setEntries(append(append([]string(nil), e[:m.cursor]...), e[m.cursor+1:]...))
-			m.cursor = min(m.cursor, max(len(e)-2, 0))
-		}
-	case "a", "o":
-		m.editing = len(e)
-		m.input.SetValue("")
-		return m, m.input.Focus()
-	case "e", "enter":
-		if len(e) > 0 {
-			m.editing = m.cursor
-			m.input.SetValue(e[m.cursor])
-			m.input.CursorEnd()
-			return m, m.input.Focus()
-		}
-	case "c":
-		n := clean(e, exists)
-		m.msg = fmt.Sprintf("clean: %d entries marked for removal (s saves)", len(e)-len(n))
-		m.setEntries(n)
-		m.cursor = min(m.cursor, max(len(n)-1, 0))
-	case "u":
-		t := &m.tabs[m.on]
-		t.cur.entries = append([]string(nil), t.saved.entries...)
-		m.cursor = min(m.cursor, max(len(t.cur.entries)-1, 0))
-		m.msg = "reverted to the saved value"
 	case "s":
-		t := &m.tabs[m.on]
-		if !t.dirty() {
-			m.msg = "nothing to save"
-		} else if err := write(scopes[m.on], t.saved, t.cur); err != nil {
-			m.msg = "not saved: " + err.Error()
-		} else {
-			t.saved.entries = append([]string(nil), t.cur.entries...)
-			m.msg = scopes[m.on].name + " PATH saved"
+		return m.startReview()
+	case "r":
+		return m.reload()
+	case "up", "k":
+		if m.on > 0 {
+			m.on--
+			m.table.SetCursor(0)
+			m.refresh()
 		}
+	case "down", "j":
+		if m.on < len(m.tabs)-1 {
+			m.on++
+			m.table.SetCursor(0)
+			m.refresh()
+		}
+	case "enter", "right", "l":
+		m.inList = true
+		m.redraw()
 	}
 	return m, nil
 }
 
-func (m model) View() tea.View {
-	var b strings.Builder
-	for i, s := range scopes {
-		label := s.name
-		if m.tabs[i].dirty() {
-			label += " *"
-		}
-		if i == m.on {
-			b.WriteString(styleTabOn.Render(label))
-		} else {
-			b.WriteString(styleTab.Render(label))
-		}
+// reload reads the selected PATH again, unless it has changes that would be lost.
+func (m model) reload() (tea.Model, tea.Cmd) {
+	if m.tab().dirty() {
+		m.status = "unsaved changes: u undoes them first"
+		return m, nil
 	}
-	b.WriteString("\n\n")
+	m.tab().load(m.st)
+	m.refresh()
+	m.status = "reloaded"
+	return m, nil
+}
 
-	t := m.tabs[m.on]
-	e := t.cur.entries
-	if t.err != nil {
-		b.WriteString(styleMissing.Render("cannot read: "+t.err.Error()) + "\n")
+// Typing a filter: the table narrows as you type; enter keeps it, esc drops it.
+func (m model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		m.filter.Blur()
+		return m, nil
+	case "esc":
+		m.filter.Blur()
+		m.filter.SetValue("")
+		m.refresh()
+		return m, nil
 	}
-	dup, missing := status(e, exists)
-	for i := m.top; i < len(e) && i < m.top+m.height; i++ {
-		line := fmt.Sprintf("%3d  %s", i+1, e[i])
-		if i == m.editing {
-			line = fmt.Sprintf("%3d  %s", i+1, m.input.View())
+	var cmd tea.Cmd
+	m.filter, cmd = m.filter.Update(msg)
+	m.table.SetCursor(0)
+	m.refresh()
+	return m, cmd
+}
+
+// editable refuses changes to a PATH that cannot be written, saying why.
+func (m *model) editable() bool {
+	t := m.tab()
+	switch {
+	case t.err != nil:
+		m.status = "this PATH could not be read"
+	case t.readOnly:
+		m.status = "read-only: the " + t.scope.name + " PATH needs admin (gsudo pathed)"
+	default:
+		return true
+	}
+	return false
+}
+
+// The table: change entries, filter them, save; ←/h/esc/q go back to the sidebar.
+func (m model) updateList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	t := m.tab()
+	e, i, ok := m.current()
+	switch {
+	case key.Matches(msg, keyBack): // one level up: first out of a filter, then to the sidebar
+		if m.filter.Value() != "" {
+			m.filter.SetValue("")
+			m.refresh()
+			return m, nil
 		}
+		m.inList = false
+		m.redraw()
+		return m, nil
+	case key.Matches(msg, keySave):
+		return m.startReview()
+	case key.Matches(msg, keyReload):
+		return m.reload()
+	case key.Matches(msg, keyFilter):
+		return m, m.filter.Focus()
+	case key.Matches(msg, keyOpen):
+		if ok {
+			exec.Command("explorer", expand(e.value)).Start()
+		}
+		return m, nil
+	case key.Matches(msg, keyAdd):
+		if m.editable() {
+			return m.openInput(i, true)
+		}
+		return m, nil
+	case key.Matches(msg, keyEdit):
+		if ok && m.editable() {
+			return m.openInput(i, false)
+		}
+		return m, nil
+	case key.Matches(msg, keyRemove):
+		if ok && m.editable() {
+			if e.added() { // never saved: nothing to keep around
+				t.entries = slices.Delete(t.entries, i, i+1)
+				m.refresh()
+			} else {
+				e.removed = !e.removed
+				m.redraw()
+			}
+		}
+		return m, nil
+	case key.Matches(msg, keyMoveUp, keyMoveDn):
 		switch {
-		case missing[i]:
-			line = styleMissing.Render(line + "  missing")
-		case dup[i]:
-			line = styleDup.Render(line + "  duplicate")
+		case !ok || !m.editable():
+		case m.filter.Value() != "":
+			m.status = "clear the filter (esc) to reorder"
+		default:
+			to := i - 1
+			if key.Matches(msg, keyMoveDn) {
+				to = i + 1
+			}
+			if to >= 0 && to < len(t.entries) {
+				t.entries[i], t.entries[to] = t.entries[to], t.entries[i]
+				m.table.SetCursor(to)
+				m.refresh()
+			}
 		}
-		if i == m.cursor && m.editing < 0 {
-			line = styleCursor.Render(line)
+		return m, nil
+	case key.Matches(msg, keyClean):
+		if m.editable() {
+			missing, dupOf := t.health(m.st.exists)
+			n := 0
+			for j, e := range t.entries {
+				if !e.removed && (missing[j] || dupOf[j] > 0) {
+					e.removed = true
+					n++
+				}
+			}
+			m.status = fmt.Sprintf("clean: %d entries marked for removal", n)
+			m.redraw()
 		}
-		b.WriteString(line + "\n")
+		return m, nil
+	case key.Matches(msg, keyUndo):
+		t.load(m.st)
+		m.refresh()
+		m.status = "changes undone"
+		return m, nil
 	}
-	if m.editing == len(e) {
-		b.WriteString("new  " + m.input.View() + "\n")
-	}
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	m.redraw()
+	return m, cmd
+}
 
-	b.WriteString("\n")
-	if m.msg != "" {
-		b.WriteString(m.msg + "\n")
-	}
-	if m.editing >= 0 {
-		b.WriteString(styleHelp.Render("enter keep · esc cancel"))
-	} else {
-		b.WriteString(styleHelp.Render("↑↓ move · K/J reorder · a add · e edit · d delete · c clean · u revert · s save · tab User/Machine · q quit"))
-	}
-	v := tea.NewView(b.String())
+func (m model) View() tea.View {
+	v := tea.NewView("")
 	v.AltScreen = true
+	if m.w == 0 { // the first frame comes before the terminal's size is known
+		return v
+	}
+	v.Content = m.viewList()
+	if m.reviewing {
+		v.Content = m.viewReview()
+	}
+	switch {
+	case m.confirmQuit:
+		v.Content = m.overlay(v.Content, m.quitDialog())
+	case m.input != nil:
+		v.Content = m.overlay(v.Content, m.input.view(m.tab(), m.st.exists))
+	}
 	return v
+}
+
+// overlay draws a box over the middle of the screen.
+func (m model) overlay(under, box string) string {
+	x := max((m.w-lipgloss.Width(box))/2, 0)
+	y := max((m.h-lipgloss.Height(box))/2, 0)
+	return lipgloss.NewCompositor(lipgloss.NewLayer(under), lipgloss.NewLayer(box).X(x).Y(y).Z(1)).Render()
 }

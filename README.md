@@ -33,8 +33,26 @@ pathed clean [-m]        drop duplicates and folders that do not exist
 
 `-m` works on the Machine `PATH`, which needs an elevated shell (`gsudo pathed ...`).
 
-In the editor: `↑`/`↓` move, `K`/`J` reorder, `a` add, `e` edit, `d` delete, `c` clean,
-`u` revert, `s` save, `tab` switch User/Machine, `q` quit.
+In the editor the sidebar holds the two PATHs (`*` unsaved changes, `ro` read-only without
+admin, `!` could not be read); `enter` opens one. Changes are only marked until you save:
+added entries show green, edited ones amber, removed ones red and struck through.
+
+| Key | In the list |
+| --- | --- |
+| `a` | add a folder after the cursor (checked as you type: exists? already listed?) |
+| `enter`, `e` | edit the entry |
+| `d` | remove the entry, or keep it again |
+| `K` / `J` | move the entry up / down |
+| `c` | mark every missing folder and duplicate for removal |
+| `u` | undo every change to this PATH |
+| `o` | open the folder in Explorer |
+| `/` | filter |
+| `r` | read the PATH again |
+| `s` | review the changes, then save them |
+| `←` `h` `esc` `q` | back to the sidebar |
+
+Settings (theme colors, sidebar width) live in `~/.config/pathed/config.toml`, or the file
+named by `$PATHED_CONFIG`; `pathed --default-config` prints a commented starting point.
 
 pathed changes the saved `PATH`; the shell it runs in keeps its own copy. To update that
 too, wrap it, e.g. in PowerShell:

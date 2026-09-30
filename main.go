@@ -27,9 +27,13 @@ const usage = `pathed - edit the persistent PATH
   pathed rm <dir|N> [-m]   N is the number shown by 'pathed list'
   pathed clean [-m]        drop duplicates and folders that do not exist
   pathed --version         print the version
+  pathed --config          show where the settings file is
+  pathed --default-config  print the default settings, a starting point for your own
 
 -m works on the Machine PATH, which needs admin: 'gsudo pathed ...'.
-Every write first saves the old value to %LOCALAPPDATA%\pathed\.`
+Every write first saves the old value to %LOCALAPPDATA%\pathed\.
+Settings (theme, sidebar width) are read from ~/.config/pathed/config.toml, or the file
+named by $PATHED_CONFIG.`
 
 type scope struct {
 	name string
@@ -89,6 +93,16 @@ func write(s scope, old, new pathValue) error {
 	return nil
 }
 
+// canWrite says whether this process may change the PATH: the Machine one needs admin.
+func canWrite(s scope) bool {
+	k, err := registry.OpenKey(s.root, s.key, registry.SET_VALUE)
+	if err != nil {
+		return false
+	}
+	k.Close()
+	return true
+}
+
 // ponytail: backups are never pruned; they are a few KB each.
 func backup(s scope, v pathValue) error {
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "pathed")
@@ -125,8 +139,8 @@ func expand(e string) string {
 	return e
 }
 
-// key is what two entries are compared by: expanded, case-insensitive, no trailing slash.
-func key(e string) string {
+// pathKey is what two entries are compared by: expanded, case-insensitive, no trailing slash.
+func pathKey(e string) string {
 	return strings.ToLower(strings.TrimRight(expand(e), `\/`))
 }
 
@@ -140,7 +154,7 @@ func status(entries []string, exists func(string) bool) (dup, missing []bool) {
 	seen := map[string]bool{}
 	dup, missing = make([]bool, len(entries)), make([]bool, len(entries))
 	for i, e := range entries {
-		k := key(e)
+		k := pathKey(e)
 		dup[i], missing[i] = seen[k], !exists(e)
 		seen[k] = true
 	}
@@ -180,12 +194,28 @@ func run(args []string) error {
 		case "-v", "--version":
 			fmt.Println("pathed", versionString())
 			return nil
+		case "--default-config":
+			fmt.Print(defaultConfig)
+			return nil
+		case "--config":
+			path := configPath()
+			if _, err := os.Stat(path); err != nil {
+				path += "  (not there yet: pathed --default-config > it, then edit)"
+			}
+			fmt.Println(path)
+			return nil
 		default:
 			rest = append(rest, a)
 		}
 	}
 	if len(rest) == 0 {
-		_, err := tea.NewProgram(newModel()).Run()
+		c, err := loadConfig(configPath())
+		if err != nil {
+			return err
+		}
+		cfg = c
+		applyTheme(cfg.Theme)
+		_, err = tea.NewProgram(newModel(registryStore)).Run()
 		return err
 	}
 
@@ -213,7 +243,7 @@ func run(args []string) error {
 			return err
 		}
 		for _, e := range v.entries {
-			if key(e) == key(dir) {
+			if pathKey(e) == pathKey(dir) {
 				return fmt.Errorf("%s is already in the %s PATH", dir, s.name)
 			}
 		}
@@ -235,7 +265,7 @@ func run(args []string) error {
 		} else {
 			abs, _ := filepath.Abs(rest[1])
 			for _, e := range v.entries {
-				if key(e) != key(rest[1]) && key(e) != key(abs) {
+				if pathKey(e) != pathKey(rest[1]) && pathKey(e) != pathKey(abs) {
 					n.entries = append(n.entries, e)
 				}
 			}
