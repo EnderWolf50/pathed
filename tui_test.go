@@ -10,8 +10,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// fakeStore keeps PATHs in memory: User is writable, Machine read-only, and only the
-// folders in dirs exist.
+// fakeStore keeps PATHs in memory, and only the folders in dirs exist. Machine needs admin,
+// and its UAC prompt is always declined.
 func fakeStore(user, machine []string, dirs ...string) (store, map[string][]string) {
 	saved := map[string][]string{"User": user, "Machine": machine}
 	return store{
@@ -19,6 +19,9 @@ func fakeStore(user, machine []string, dirs ...string) (store, map[string][]stri
 			return pathValue{entries: slices.Clone(saved[s.name])}, nil
 		},
 		write: func(s scope, _, new pathValue) error {
+			if s.name == "Machine" {
+				return errUACDeclined
+			}
 			saved[s.name] = slices.Clone(new.entries)
 			return nil
 		},
@@ -50,6 +53,18 @@ func typeText(m model, text string) model {
 		m = next.(model)
 	}
 	return m
+}
+
+// save presses enter on the review and runs the save it starts, as the program would.
+func save(t *testing.T, m model) model {
+	t.Helper()
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(model)
+	if !m.saving || cmd == nil {
+		t.Fatal("enter on the review did not start saving")
+	}
+	next, _ = m.Update(cmd())
+	return next.(model)
 }
 
 func sized(m model) model {
@@ -100,7 +115,7 @@ func TestEditAndSave(t *testing.T) {
 	if !m.reviewing || strings.Contains(strings.Join(saved["User"], ";"), "new") {
 		t.Fatal("s did not stop at the review")
 	}
-	m = press(m, "enter")
+	m = save(t, m)
 	want := []string{`C:\a`, `C:\gone`, `C:\new`, `C:\b`}
 	if !slices.Equal(saved["User"], want) {
 		t.Fatalf("saved %q, want %q", saved["User"], want)
@@ -114,18 +129,34 @@ func TestEditAndSave(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAndQuit(t *testing.T) {
-	st, _ := fakeStore([]string{`C:\a`}, []string{`C:\Windows`}, `C:\a`, `C:\Windows`)
+func TestMachineNeedsAdmin(t *testing.T) {
+	st, saved := fakeStore([]string{`C:\a`, `C:\b`}, []string{`C:\Windows`, `C:\old`}, `C:\a`, `C:\b`, `C:\Windows`)
 	m := sized(newModel(st))
 
-	// Machine is read-only: edits are refused, with the reason.
-	m = press(m, "j", "enter", "d")
-	if m.tab().entries[0].removed || !strings.Contains(m.status, "admin") {
-		t.Fatalf("read-only PATH changed (status %q)", m.status)
+	// Machine can be changed; only saving it needs admin.
+	m = press(m, "j", "enter", "j", "d")
+	if !m.tab().entries[1].removed {
+		t.Fatalf("the Machine PATH could not be changed (status %q)", m.status)
+	}
+	// Change User too, then save both: User is written, Machine's declined UAC marks it.
+	m = press(m, "q", "k", "enter", "d", "s")
+	m = save(t, m)
+	if !slices.Equal(saved["User"], []string{`C:\b`}) {
+		t.Fatalf("User saved %q", saved["User"])
+	}
+	machine := m.tabs[1]
+	if machine.saveErr == nil || !machine.dirty() || !machine.entries[1].removed {
+		t.Fatalf("Machine after a declined UAC: err %v, dirty %v", machine.saveErr, machine.dirty())
+	}
+	if out := strings.Join(m.outcome, "\n"); !strings.Contains(out, "Machine PATH not saved") || !strings.Contains(out, "User PATH saved") {
+		t.Fatalf("outcome:\n%s", out)
+	}
+	m = press(m, "esc", "q")
+	if m.inList {
+		t.Fatal("q did not go back to the sidebar")
 	}
 
-	// A change on User makes quitting ask; only the question's keys count.
-	m = press(m, "q", "k", "enter", "d", "q")
+	// The unsaved Machine change makes quitting ask; only the question's keys count.
 	if m.inList {
 		t.Fatal("q did not go back to the sidebar")
 	}
@@ -214,5 +245,17 @@ func TestConfigMistakesAreErrors(t *testing.T) {
 	c, err := parseConfig(cfg, "[theme]\nok = \"42\"")
 	if err != nil || c.Theme.OK != "42" || c.Theme.Accent != "#ffc799" {
 		t.Errorf("override: %+v, %v", c.Theme, err)
+	}
+}
+
+func TestWriteRequestRoundTrip(t *testing.T) {
+	r := writeRequest{Scope: "Machine", Old: []string{`D:\a`}, New: []string{`D:\a`, `%ProgramFiles%\Tool "x"`}, Type: 2}
+	arg, err := r.encode()
+	if err != nil || strings.ContainsAny(arg, " \"") {
+		t.Fatalf("argument %q (%v) would need quoting on a command line", arg, err)
+	}
+	back, err := decodeRequest(arg)
+	if err != nil || back.Scope != r.Scope || !slices.Equal(back.New, r.New) || back.Type != r.Type {
+		t.Fatalf("round trip: %+v, %v", back, err)
 	}
 }

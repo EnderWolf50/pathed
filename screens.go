@@ -47,8 +47,10 @@ func (m model) viewList() string {
 		switch {
 		case t.err != nil:
 			count = styleErr.Render("!")
-		case t.readOnly:
-			count += " ro"
+		case t.saveErr != nil:
+			count = styleErr.Render("!") + " " + count
+		case t.needsAdmin:
+			count += " uac"
 		}
 		if t.dirty() {
 			count += " *"
@@ -110,8 +112,10 @@ func (m model) viewPanel() string {
 	switch {
 	case t.err != nil:
 		heading += styleErr.Render(" · could not be read: " + t.err.Error())
-	case t.readOnly:
-		heading += styleDim.Render(" · read-only (needs admin)")
+	case t.saveErr != nil:
+		heading += styleErr.Render(" · not saved: " + t.saveErr.Error())
+	case t.needsAdmin:
+		heading += styleDim.Render(" · saving asks for admin (UAC)")
 	}
 	if m.status != "" {
 		heading += "  " + styleErr.Render(m.status)
@@ -323,8 +327,8 @@ func (m model) reviewLines(width int) []string {
 			continue
 		}
 		head := styleAccent.Render(t.scope.name + " PATH")
-		if t.readOnly {
-			head += styleErr.Render("  read-only: saving it needs admin (gsudo pathed)")
+		if t.needsAdmin {
+			head += styleDim.Render("  saving it asks for admin: UAC will prompt")
 		}
 		lines = append(lines, head)
 		for i, e := range t.entries {
@@ -353,7 +357,10 @@ func (m model) viewReview() string {
 	width := m.w - stylePanel.GetHorizontalFrameSize()
 	title := styleAccent.Render("Review") + styleDim.Render(" · what saving will write")
 	lines, help := m.reviewLines(width), "enter/s save · esc/q back to the list"
-	if m.outcome != nil {
+	switch {
+	case m.saving:
+		title, help = styleAccent.Render("Saving…"), "answer the UAC prompt if one opened"
+	case m.outcome != nil:
 		title, lines, help = styleAccent.Render("Saved"), m.outcome, "enter/esc back to the list · q quit"
 	}
 	room := max(m.h-stylePanel.GetVerticalFrameSize()-4, 1)
@@ -368,6 +375,9 @@ func (m model) viewReview() string {
 }
 
 func (m model) updateReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.saving {
+		return m, nil // nothing to do but wait
+	}
 	if m.outcome != nil {
 		switch msg.String() {
 		case "q":
@@ -386,21 +396,51 @@ func (m model) updateReview(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// save writes every changed PATH; one that fails keeps its changes for another try.
+// savedMsg brings back how each write went: an error per tab, nil when it was saved.
+type savedMsg struct{ errs map[int]error }
+
+// save writes every changed PATH off the UI loop: writing the Machine PATH unelevated waits
+// for UAC. The tabs are only read here; saved updates them when the answers are in.
 func (m model) save() (tea.Model, tea.Cmd) {
-	m.outcome = []string{}
-	for _, t := range m.tabs {
-		if !t.dirty() {
-			continue
+	type job struct {
+		i        int
+		s        scope
+		old, new pathValue
+	}
+	var jobs []job
+	for i, t := range m.tabs {
+		if t.dirty() {
+			jobs = append(jobs, job{i, t.scope, t.saved, pathValue{t.result(), t.saved.typ}})
 		}
-		err := m.st.write(t.scope, t.saved, pathValue{t.result(), t.saved.typ})
-		if err != nil {
-			m.outcome = append(m.outcome, styleErr.Render("✗ ")+t.scope.name+" PATH not saved: "+err.Error())
-			continue
+	}
+	m.saving = true
+	write := m.st.write
+	return m, func() tea.Msg {
+		errs := map[int]error{}
+		for _, j := range jobs { // User first: a declined UAC prompt for Machine cannot hold it up
+			errs[j.i] = write(j.s, j.old, j.new)
 		}
-		t.load(m.st)
-		m.outcome = append(m.outcome, styleOK.Render("✓ ")+t.scope.name+" PATH saved"+
-			styleDim.Render(`  (the old value is in %LOCALAPPDATA%\pathed)`))
+		return savedMsg{errs}
+	}
+}
+
+// saved reloads what was written; a PATH that failed is marked and keeps its changes for
+// another try.
+func (m model) saved(msg savedMsg) (tea.Model, tea.Cmd) {
+	m.saving, m.outcome = false, []string{}
+	for i, t := range m.tabs {
+		err, tried := msg.errs[i]
+		switch {
+		case !tried:
+		case err != nil:
+			t.saveErr = err
+			m.outcome = append(m.outcome, styleErr.Render("✗ ")+t.scope.name+" PATH not saved: "+err.Error(),
+				styleDim.Render("  its changes are kept: s tries again"))
+		default:
+			t.load(m.st)
+			m.outcome = append(m.outcome, styleOK.Render("✓ ")+t.scope.name+" PATH saved"+
+				styleDim.Render(`  (the old value is in %LOCALAPPDATA%\pathed)`))
+		}
 	}
 	m.outcome = append(m.outcome, "", styleDim.Render("New terminals see the change; with the pwsh wrapper, this one does too once pathed exits."))
 	m.refresh()

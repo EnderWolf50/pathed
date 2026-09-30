@@ -31,10 +31,11 @@ pathed rm <dir|N> [-m]   N is the number shown by 'pathed list'
 pathed clean [-m]        drop duplicates and folders that do not exist
 ```
 
-`-m` works on the Machine `PATH`, which needs an elevated shell (`gsudo pathed ...`).
+`-m` works on the Machine `PATH`. Writing it needs admin: unless pathed already runs
+elevated, saving asks UAC, and an elevated copy of pathed does the write.
 
-In the editor the sidebar holds the two PATHs (`*` unsaved changes, `ro` read-only without
-admin, `!` could not be read); `enter` opens one. Changes are only marked until you save:
+In the editor the sidebar holds the two PATHs (`*` unsaved changes, `uac` saving it will ask
+for admin, `!` could not be read or saved); `enter` opens one. Changes are only marked until you save:
 added entries show green, edited ones amber, removed ones red and struck through.
 
 | Key | In the list |

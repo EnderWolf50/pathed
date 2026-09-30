@@ -30,7 +30,8 @@ const usage = `pathed - edit the persistent PATH
   pathed --config          show where the settings file is
   pathed --default-config  print the default settings, a starting point for your own
 
--m works on the Machine PATH, which needs admin: 'gsudo pathed ...'.
+-m works on the Machine PATH; saving it asks for admin (UAC) unless pathed already runs
+elevated.
 Every write first saves the old value to %LOCALAPPDATA%\pathed\.
 Settings (theme, sidebar width) are read from ~/.config/pathed/config.toml, or the file
 named by $PATHED_CONFIG.`
@@ -68,10 +69,22 @@ func read(s scope) (pathValue, error) {
 	return pathValue{split(v), typ}, nil
 }
 
+// write saves a PATH. One this process may not write (the Machine PATH, unelevated) is
+// written by an elevated copy of pathed, after UAC asks.
 func write(s scope, old, new pathValue) error {
+	err := writeDirect(s, old, new)
+	if errors.Is(err, errNeedsAdmin) {
+		return writeElevated(s, old, new)
+	}
+	return err
+}
+
+var errNeedsAdmin = errors.New("needs admin")
+
+func writeDirect(s scope, old, new pathValue) error {
 	k, err := registry.OpenKey(s.root, s.key, registry.SET_VALUE)
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		return fmt.Errorf("the %s PATH needs admin: run it through gsudo", s.name)
+		return fmt.Errorf("the %s PATH %w", s.name, errNeedsAdmin)
 	}
 	if err != nil {
 		return err
@@ -180,6 +193,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) == 3 && args[0] == elevatedFlag {
+		os.Exit(runElevated(args[1], args[2]))
+	}
 	s, front := scopes[0], false
 	var rest []string
 	for _, a := range args {

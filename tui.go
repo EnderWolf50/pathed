@@ -37,16 +37,17 @@ func (e *entry) edited() bool { return e.orig != "" && e.value != e.orig }
 
 // tab is one PATH, User or Machine.
 type tab struct {
-	scope    scope
-	saved    pathValue
-	entries  []*entry
-	err      error // it could not be read
-	readOnly bool  // it cannot be written without admin
+	scope      scope
+	saved      pathValue
+	entries    []*entry
+	err        error // it could not be read
+	needsAdmin bool  // saving it asks for admin (UAC)
+	saveErr    error // the last save failed; the changes are still here
 }
 
 func (t *tab) load(st store) {
 	t.saved, t.err = st.read(t.scope)
-	t.readOnly = !st.canWrite(t.scope)
+	t.needsAdmin, t.saveErr = !st.canWrite(t.scope), nil
 	t.entries = nil
 	for _, v := range t.saved.entries {
 		t.entries = append(t.entries, &entry{value: v, orig: v})
@@ -136,6 +137,7 @@ type model struct {
 	input       *inputBox // adding or editing an entry
 	confirmQuit bool      // unsaved changes: quit anyway?
 	reviewing   bool      // the changes, before saving them
+	saving      bool      // the save is running (UAC may be asking)
 	outcome     []string  // what the save did, shown on the review screen afterwards
 }
 
@@ -288,6 +290,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filter.SetWidth(width - 2)
 		m.help.SetWidth(width)
 		m.redraw()
+	case savedMsg:
+		return m.saved(msg)
 	case tea.KeyPressMsg:
 		m.status = ""
 		if msg.String() == "ctrl+c" {
@@ -384,18 +388,14 @@ func (m model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// editable refuses changes to a PATH that cannot be written, saying why.
+// editable refuses changes to a PATH that could not be read. One that needs admin can be
+// changed; saving it asks UAC.
 func (m *model) editable() bool {
-	t := m.tab()
-	switch {
-	case t.err != nil:
+	if m.tab().err != nil {
 		m.status = "this PATH could not be read"
-	case t.readOnly:
-		m.status = "read-only: the " + t.scope.name + " PATH needs admin (gsudo pathed)"
-	default:
-		return true
+		return false
 	}
-	return false
+	return true
 }
 
 // The table: change entries, filter them, save; ←/h/esc/q go back to the sidebar.
