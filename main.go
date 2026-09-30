@@ -5,6 +5,7 @@
 package main
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +27,8 @@ const usage = `pathed - edit the persistent PATH
   pathed add <dir> [-m] [--front]
   pathed rm <dir|N> [-m]   N is the number shown by 'pathed list'
   pathed clean [-m]        drop duplicates and folders that do not exist
+  pathed init pwsh         print a pathed function that also updates this shell's PATH;
+                           in $PROFILE: pathed.exe init pwsh | Out-String | Invoke-Expression
   pathed --version         print the version
   pathed --config          show where the settings file is
   pathed --default-config  print the default settings, a starting point for your own
@@ -35,6 +38,21 @@ elevated.
 Every write first saves the old value to %LOCALAPPDATA%\pathed\.
 Settings (theme, sidebar width) are read from ~/.config/pathed/config.toml, or the file
 named by $PATHED_CONFIG.`
+
+// pwshInit is the PowerShell wrapper 'pathed init pwsh' prints: pathed.exe cannot change
+// the PATH of the shell that runs it, so a function in that shell has to.
+//
+//go:embed init.ps1
+var pwshInit string
+
+// shellInit returns the wrapper for a shell.
+func shellInit(shell string) (string, error) {
+	switch strings.ToLower(shell) {
+	case "pwsh", "powershell":
+		return pwshInit, nil
+	}
+	return "", fmt.Errorf("no init for %q; the shells are: pwsh (or powershell)", shell)
+}
 
 type scope struct {
 	name string
@@ -233,6 +251,17 @@ func run(args []string) error {
 		applyTheme(cfg.Theme)
 		_, err = tea.NewProgram(newModel(registryStore)).Run()
 		return err
+	}
+	if rest[0] == "init" {
+		if len(rest) != 2 {
+			return errors.New("init needs a shell: pathed init pwsh")
+		}
+		script, err := shellInit(rest[1])
+		if err != nil {
+			return err
+		}
+		fmt.Print(script)
+		return nil
 	}
 
 	v, err := read(s)
