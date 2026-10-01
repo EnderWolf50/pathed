@@ -46,7 +46,7 @@ added entries show green, edited ones amber, removed ones red and struck through
 
 | Key | In the list |
 | --- | --- |
-| `a` | add a folder after the cursor (checked as you type: exists? already listed?) |
+| `a` / `i` | add a folder after / before the cursor (checked as you type: exists? already listed?) |
 | `enter`, `e` | edit the entry |
 | `d` | remove the entry, or keep it again |
 | `K` / `J` | move the entry up / down |
