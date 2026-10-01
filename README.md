@@ -40,9 +40,12 @@ pathed init pwsh         print a PowerShell wrapper that also updates the curren
 `-m` works on the Machine `PATH`. Writing it needs admin: unless pathed already runs
 elevated, saving asks UAC, and an elevated copy of pathed does the write.
 
-In the editor the sidebar holds the two PATHs (`*` unsaved changes, `uac` saving it will ask
-for admin, `!` could not be read or saved); `enter` opens one. Changes are only marked until you save:
-added entries show green, edited ones amber, removed ones red and struck through.
+In the editor the sidebar holds the two PATHs, each with its number of entries (an `admin`
+badge: saving it asks for admin through UAC; `*` unsaved changes, `!` could not be read or
+saved); `enter` opens one. Changes are only marked until you save: added entries show green,
+edited ones amber, removed ones red and struck through; a missing folder or a duplicate gets
+a light violet tint. The divider under the list carries the key to these colors, and the
+review before saving names every entry added, removed, edited or moved.
 
 | Key | In the list |
 | --- | --- |
@@ -51,14 +54,15 @@ added entries show green, edited ones amber, removed ones red and struck through
 | `d` | remove the entry, or keep it again |
 | `K` / `J` | move the entry up / down |
 | `c` | mark every missing folder and duplicate for removal |
-| `u` | undo every change to this PATH |
+| `u` | undo the last change; again for the one before |
+| `z` | redo what `u` undid; a new change ends what can be redone |
 | `o` | open the folder in Explorer |
 | `/` | filter |
-| `r` | read the PATH again |
+| `R` | read the PATH again |
 | `s` | review the changes, then save them |
 | `←` `h` `esc` `q` | back to the sidebar |
 
-Settings (theme colors, sidebar width) live in `~/.config/pathed/config.toml`, or the file
+Settings (theme colors, `sidebar_width` (30 by default)) live in `~/.config/pathed/config.toml`, or the file
 named by `$PATHED_CONFIG`; `pathed --default-config` prints a commented starting point.
 
 pathed changes the saved `PATH`, but the shell it runs in keeps its own copy, which a program

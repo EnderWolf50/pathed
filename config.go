@@ -12,7 +12,7 @@ const defaultConfig = `# pathed's settings. Every key is optional: one left out 
 # Colors are "#rrggbb" or an ANSI color number, "0" to "255".
 
 # Width of the sidebar, in cells.
-sidebar_width = 24
+sidebar_width = 30
 
 ` + theme.Default
 
@@ -22,8 +22,8 @@ type config struct {
 }
 
 func checkConfig(c config) error {
-	if c.SidebarWidth < 16 {
-		return errors.New("sidebar_width must be at least 16")
+	if c.SidebarWidth < 20 {
+		return errors.New("sidebar_width must be at least 20")
 	}
 	return c.Theme.Check()
 }
