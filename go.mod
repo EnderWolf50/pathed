@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	charm.land/bubbletea/v2 v2.0.10
-	github.com/EnderWolf50/enved v0.0.0-20260930210216-e0d012314a99
+	github.com/EnderWolf50/enved v0.0.0-20261001025057-56092c40ea6b
 	github.com/charmbracelet/x/ansi v0.11.8
 )
 
